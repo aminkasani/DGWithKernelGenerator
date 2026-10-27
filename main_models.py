@@ -238,7 +238,7 @@ class AlModelV2ArConvRawVarWeight(nn.Module):
         # return x
         h = self.features(x)
         x = h.mean([2, 3])  # Global Average Pooling
-        h = torch.amax(h, dim=[2, 3])  # Global Max Pooling
+        h = x
         x = self.classifier(x)
         return x,h
 
