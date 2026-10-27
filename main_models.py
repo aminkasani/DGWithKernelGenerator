@@ -141,9 +141,7 @@ class InputWeightsv5(nn.Module):
             nn.Conv2d(weightPerInput, self.weightPerInput, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(self.weightPerInput),
             nn.ReLU6(inplace=True),
-            # nn.Conv3d(weightPerInput, self.weightPerInput, kernel_size=3, stride=1, padding=1, bias=False),
-            # nn.BatchNorm3d(self.weightPerInput),
-            # nn.ReLU6(inplace=True)
+
             ))
         self.expansion.append(nn.Sequential(
             nn.Conv2d(self.weightPerInput, self.imgC, kernel_size=3, stride=2, padding=1, bias=False),
@@ -151,11 +149,7 @@ class InputWeightsv5(nn.Module):
             nn.ReLU6(inplace=True)
         ))
         self.features = []
-        # self.features = [nn.Sequential(
-        #     nn.Conv3d(1, self.weightPerInput, kernel_size=(imgC,3,3), stride=(1,2,2), padding=1,bias=False),
-        #     nn.BatchNorm3d(self.weightPerInput),
-        #     nn.ReLU(inplace=True)
-        # )]
+
         if kernelSize==7:
             self.features.append(nn.Conv3d(1, self.weightPerInput, kernel_size=(3,3,3), stride=(1,2,2), padding=(1,1,1), bias=False))
         if kernelSize==5:
@@ -176,8 +170,7 @@ class InputWeightsv5(nn.Module):
         x = x.unsqueeze(1)
         x = self.features(x)
         x = self.sigmoid(x)
-        # x = self.tanh(x)
-        # x = x.view(x.shape[0], 32, 3, 5, 5)
+
         return x
 
 class AlModelV2ArConvRawVarWeight(nn.Module):
@@ -202,9 +195,7 @@ class AlModelV2ArConvRawVarWeight(nn.Module):
         # First layer (Conv2D + BatchNorm + ReLU6)
         input_channel = int(16 * width_mult)
         self.last_channel = int(1280 * width_mult) if width_mult > 1.0 else 1280
-        # self.first_layer = nn.Conv2d(3, input_channel, kernel_size=7, stride=2, padding=3, bias=False)
-        # for param in self.first_layer.parameters():
-        #     param.requires_grad = False
+
         self.features = [nn.Sequential(
             nn.BatchNorm2d(input_channel),
             nn.ReLU(inplace=True)
@@ -235,13 +226,7 @@ class AlModelV2ArConvRawVarWeight(nn.Module):
         # self.softmax = nn.Softmax(dim=1)
 
     def forward(self, x,weights):
-    # def forward(self, x):
-        
-        # with torch.no_grad():  # Avoid gradient tracking for weight assignment
-        #     self.first_layer.weight.copy_(weights)
-        
-        # self.first_layer.weight = nn.Parameter(weights)
-        # x = self.first_layer(x)
+
         N=weights.size(0)
         Hw=weights.size(3)
         Hi=x.size(2)
@@ -262,16 +247,97 @@ class AlMainModelV2ArConvRawVarWeight(nn.Module):
         super(AlMainModelV2ArConvRawVarWeight, self).__init__()
         self.model = AlModelV2ArConvRawVarWeight(num_classes=num_classes,firstKernel=5)
         self.modelW = InputWeightsv5(weightPerInput=16,kernelSize=5,inputSize=224)
-        # self.bestKernel = randomKWeight
         self.last_weights = None
 
     def forward(self, x):
         weight = self.modelW(x)
         self.last_weights = weight
-        # weight = weight.view(32, 3, 5, 5)
-        # with torch.no_grad():  # Ensure no gradients for CPU operation
-            # weight=self.bestKernel(weight,k=32)
-        # weight = weight.clone().detach().requires_grad_(True)
-        # weight=self.bestKernel(weight,k=32)
-        # weight=torch.squeeze(weight, dim=0)
+
         return self.model(x,weight)
+
+class InvertedResidual(nn.Module):
+    def __init__(self, in_channels, out_channels, stride, expand_ratio):
+        super(InvertedResidual, self).__init__()
+        self.stride = stride
+        hidden_dim = in_channels * expand_ratio
+        self.use_residual = self.stride == 1 and in_channels == out_channels
+
+        layers = []
+        if expand_ratio != 1:
+            # Pointwise convolution (expand)
+            layers.append(nn.Conv2d(in_channels, hidden_dim, kernel_size=1, stride=1, bias=False))
+            layers.append(nn.BatchNorm2d(hidden_dim))
+            layers.append(nn.ReLU6(inplace=True))
+        # Depthwise convolution
+        layers.extend([
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, stride=stride, padding=1, groups=hidden_dim, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.ReLU6(inplace=True)
+        ])
+        # Pointwise convolution (project)
+        layers.extend([
+            nn.Conv2d(hidden_dim, out_channels, kernel_size=1, stride=1, bias=False),
+            nn.BatchNorm2d(out_channels)
+        ])
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        if self.use_residual:
+            return x + self.conv(x)
+        else:
+            return self.conv(x)
+class AlMobileNetV2(nn.Module):
+    def __init__(self, num_classes=1000, width_mult=1.0):
+        super(AlMobileNetV2, self).__init__()
+        # Configuration for inverted residual blocks
+        self.cfgs = [
+            # t, c, n, s
+            [1, 16, 1, 1],
+            [6, 24, 2, 2],
+            [6, 32, 3, 2],
+            [6, 64, 4, 2],
+            [6, 96, 3, 1],
+            [6, 160, 3, 2],
+            [6, 320, 1, 1],
+        ]
+
+        # First layer (Conv2D + BatchNorm + ReLU6)
+        input_channel = int(32 * width_mult)
+        self.last_channel = int(1280 * width_mult) if width_mult > 1.0 else 1280
+        self.features = [nn.Sequential(
+            nn.Conv2d(3, input_channel, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(input_channel),
+            nn.ReLU6(inplace=True)
+        )]
+
+        # Building inverted residual blocks
+        for t, c, n, s in self.cfgs:
+            output_channel = int(c * width_mult)
+            for i in range(n):
+                stride = s if i == 0 else 1
+                self.features.append(InvertedResidual(input_channel, output_channel, stride, expand_ratio=t))
+                input_channel = output_channel
+
+        # Building last layer (Conv2D + BatchNorm + ReLU6)
+        self.head =nn.Sequential(
+            nn.Conv2d(input_channel, self.last_channel, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(self.last_channel),
+            nn.ReLU6(inplace=True)
+        )
+
+        self.features = nn.Sequential(*self.features)
+        self.head = nn.Sequential(*self.head)
+
+        # Classification layer
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.2),
+            nn.Linear(self.last_channel, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        h = self.head(x)
+        x = h.mean([2, 3])  # Global Average Pooling
+        h = x
+        x = self.classifier(x)
+        return x,h
